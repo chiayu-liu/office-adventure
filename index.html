@@ -65,46 +65,12 @@ html, body {
   -webkit-backdrop-filter: blur(8px);
 }
 
-/* Progress bar */
-#progress-container {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex: 1;
-  margin-right: 12px;
-}
-
+/* Progress label */
 #progress-label {
   font-size: 12px;
   font-weight: 500;
   color: var(--text-dim);
   white-space: nowrap;
-}
-
-#progress-track {
-  flex: 1;
-  max-width: 160px;
-  height: 6px;
-  background: var(--border);
-  border-radius: 3px;
-  overflow: hidden;
-}
-
-#progress-fill {
-  height: 100%;
-  width: 0%;
-  background: linear-gradient(90deg, var(--accent-dim), var(--accent), var(--accent-bright));
-  border-radius: 3px;
-  transition: width 0.6s ease;
-}
-
-#progress-fill.pulse {
-  animation: progressPulse 0.8s ease;
-}
-
-@keyframes progressPulse {
-  0%, 100% { filter: brightness(1); }
-  50% { filter: brightness(1.6); }
 }
 
 /* Mini-map canvas */
@@ -760,6 +726,27 @@ html, body {
 
 #map-canvas { position: absolute; top: 0; left: 0; }
 
+.map-tooltip {
+  position: absolute;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+  pointer-events: none;
+  white-space: nowrap;
+  z-index: 10;
+  transform: translate(-50%, -100%);
+  margin-top: -8px;
+  transition: opacity 0.15s ease;
+}
+
+.map-tooltip.hidden { display: none; }
+
 /* ============================================================
    LOADING
    ============================================================ */
@@ -1207,6 +1194,7 @@ html, body {
     </div>
     <div id="map-canvas-container">
       <canvas id="map-canvas"></canvas>
+      <div id="map-tooltip" class="map-tooltip hidden"></div>
     </div>
   </div>
 
@@ -1703,9 +1691,10 @@ function getUnvisitedNeighbors() {
     for (var d in cc) {
       var t = cc[d];
       if (G.visited[t] || seen[t]) continue;
-      var di = DIR_INFO[d];
-      if (di && G.positions[fn]) {
-        result.push({ fn: t, x: G.positions[fn].x + di.dx, y: G.positions[fn].y + di.dy });
+      // Use the actual grid position of the target room (not ±1 offset)
+      var tp = G.positions[t];
+      if (tp) {
+        result.push({ fn: t, x: tp.x, y: tp.y });
         seen[t] = true;
       }
     }
@@ -1839,20 +1828,21 @@ function renderFullMap() {
     ctx.strokeStyle = '#d5cbbe';
     ctx.lineWidth = wallThick;
 
+    // Walls: only draw where there is NO connection (regardless of visited status)
     // Top wall (north)
-    if (!cc['\u5F80\u5317'] || !G.visited[cc['\u5F80\u5317']]) {
+    if (!cc['\u5F80\u5317']) {
       ctx.beginPath(); ctx.moveTo(c.x + gap, c.y + gap); ctx.lineTo(c.x + gap + innerSize, c.y + gap); ctx.stroke();
     }
     // Bottom wall (south)
-    if (!cc['\u5F80\u5357'] || !G.visited[cc['\u5F80\u5357']]) {
+    if (!cc['\u5F80\u5357']) {
       ctx.beginPath(); ctx.moveTo(c.x + gap, c.y + gap + innerSize); ctx.lineTo(c.x + gap + innerSize, c.y + gap + innerSize); ctx.stroke();
     }
     // Left wall (west)
-    if (!cc['\u5F80\u897F'] || !G.visited[cc['\u5F80\u897F']]) {
+    if (!cc['\u5F80\u897F']) {
       ctx.beginPath(); ctx.moveTo(c.x + gap, c.y + gap); ctx.lineTo(c.x + gap, c.y + gap + innerSize); ctx.stroke();
     }
     // Right wall (east)
-    if (!cc['\u5F80\u6771'] || !G.visited[cc['\u5F80\u6771']]) {
+    if (!cc['\u5F80\u6771']) {
       ctx.beginPath(); ctx.moveTo(c.x + gap + innerSize, c.y + gap); ctx.lineTo(c.x + gap + innerSize, c.y + gap + innerSize); ctx.stroke();
     }
 
@@ -1959,6 +1949,81 @@ function initMapControls() {
       pinchDist = 0;
     }
   });
+
+  // Click/tap to show room name tooltip
+  var tooltip = $('map-tooltip');
+  var dragMoved = false;
+  var dragStartPos = null;
+
+  container.addEventListener('mousedown', function (e) {
+    dragStartPos = { x: e.clientX, y: e.clientY };
+    dragMoved = false;
+  }, true);
+
+  container.addEventListener('mousemove', function () {
+    if (dragStartPos) dragMoved = true;
+  }, true);
+
+  container.addEventListener('click', function (e) {
+    // Ignore if it was a drag
+    if (dragMoved && dragStartPos) {
+      var dx = e.clientX - dragStartPos.x, dy = e.clientY - dragStartPos.y;
+      if (Math.abs(dx) > 5 || Math.abs(dy) > 5) { dragStartPos = null; return; }
+    }
+    dragStartPos = null;
+    handleMapClick(e, container, tooltip);
+  });
+
+  // Touch tap
+  var tapStart = null;
+  container.addEventListener('touchstart', function (e) {
+    if (e.touches.length === 1) tapStart = { x: e.touches[0].clientX, y: e.touches[0].clientY, t: Date.now() };
+  }, true);
+
+  container.addEventListener('touchend', function (e) {
+    if (!tapStart || e.touches.length > 0) { tapStart = null; return; }
+    var dt = Date.now() - tapStart.t;
+    if (dt < 300) {
+      handleMapClick({ clientX: tapStart.x, clientY: tapStart.y }, container, tooltip);
+    }
+    tapStart = null;
+  }, true);
+}
+
+function handleMapClick(e, container, tooltip) {
+  var rect = container.getBoundingClientRect();
+  var clickX = e.clientX - rect.left;
+  var clickY = e.clientY - rect.top;
+
+  var cellSize = 80 * mapSt.sc;
+  var cw = container.clientWidth, ch = container.clientHeight;
+  var ox = cw / 2 + mapSt.px, oy = ch / 2 + mapSt.py;
+  var gap = 4 * mapSt.sc;
+
+  // Check visited rooms
+  var found = null;
+  for (var fn in G.visited) {
+    var p = G.positions[fn];
+    if (!p) continue;
+    var cx = ox + p.x * cellSize - cellSize / 2 + gap;
+    var cy = oy + p.y * cellSize - cellSize / 2 + gap;
+    var inner = cellSize - gap * 2;
+    if (clickX >= cx && clickX <= cx + inner && clickY >= cy && clickY <= cy + inner) {
+      found = fn;
+      break;
+    }
+  }
+
+  if (found) {
+    var room = G.roomMap[found];
+    tooltip.textContent = room ? room.title : found;
+    tooltip.style.left = clickX + 'px';
+    tooltip.style.top = (clickY - 4) + 'px';
+    tooltip.classList.remove('hidden');
+    setTimeout(function () { tooltip.classList.add('hidden'); }, 2000);
+  } else {
+    tooltip.classList.add('hidden');
+  }
 }
 
 /* ----------------------------------------------------------------
@@ -2563,6 +2628,9 @@ function navigateTo(filename, direction) {
     updateProgress();
     renderMinimap();
 
+    // Check for hidden character (collect on room entry)
+    setTimeout(function () { checkRoomChar(filename); }, 600);
+
     // Fade in
     setTimeout(function () {
       overlay.classList.remove('active');
@@ -3074,11 +3142,26 @@ function init() {
         var saved = loadSave();
         if (saved && saved.cur && G.roomMap[saved.cur]) {
           G.cur = saved.cur;
-          G.visited = saved.visited || {};
-          G.choices = saved.choices || {};
-          G.choiceResults = saved.choiceResults || {};
-          // G.positions are computed by buildConnections grid, not restored from save
-          G.log = saved.log || [];
+
+          // Clean stale data: filter out rooms that no longer exist
+          var sv = saved.visited || {};
+          var sc = saved.choices || {};
+          var sr = saved.choiceResults || {};
+          var cleanVisited = {}, cleanChoices = {}, cleanResults = {};
+          for (var fn in sv) { if (G.roomMap[fn]) cleanVisited[fn] = true; }
+          for (var fn in sc) { if (G.roomMap[fn]) cleanChoices[fn] = sc[fn]; }
+          for (var fn in sr) { if (G.roomMap[fn]) cleanResults[fn] = sr[fn]; }
+          G.visited = cleanVisited;
+          G.choices = cleanChoices;
+          G.choiceResults = cleanResults;
+
+          // Filter log entries for existing rooms
+          var savedLog = saved.log || [];
+          G.log = [];
+          for (var li = 0; li < savedLog.length; li++) {
+            if (!savedLog[li].room || G.roomMap[savedLog[li].room]) G.log.push(savedLog[li]);
+          }
+
           G.traits = saved.traits || { action: 0, observer: 0, adventurer: 0, warmheart: 0 };
           if (saved.collectedChars) G.collectedChars = saved.collectedChars;
           if (saved.playerName) G.playerName = saved.playerName;
